@@ -112,7 +112,7 @@ class SubtitleTranscription:
     # -------------------------------------------------------------------------------
 
     def translate(self, text):
-        api_token = "api_HEtcUvCvjXPLClCVJbaEwhaqbBmGoDYxFu"
+        api_token = "api_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
         headers = {"Authorization": f"Bearer {api_token}"}
         model_id = 'Helsinki-NLP/opus-mt-zh-en'
         url = f"https://api-inference.huggingface.co/models/{model_id}"
