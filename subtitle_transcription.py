@@ -2,9 +2,14 @@ import cv2
 import easyocr
 import requests
 import numpy as np
+import pandas as pd
 from time import sleep
-from skimage.metrics import structural_similarity as ssim
+from os.path import exists
 from skimage.metrics import mean_squared_error
+from skimage.metrics import structural_similarity as ssim
+
+
+COLUMNS = ['frame', 'ssim', 'mse', 'text', 'trans']
 
 
 class SubtitleTranscription:
@@ -12,12 +17,24 @@ class SubtitleTranscription:
     def __init__(self, video_file) -> None:
         self.bbox = [0, 413, 640, 67]
         self.video_file = video_file
-        self.vidcap = self.load_video(video_file)
+        self.df_file = video_file.replace('mp4', 'csv')
 
+        self.vidcap = self.load_video(video_file)
+        self.fps = self.vidcap.get(cv2.CAP_PROP_FPS)
         self.w_frame = int(self.vidcap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.h_frame = int(self.vidcap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.fps = self.vidcap.get(cv2.CAP_PROP_FPS)
         self.frame_count = self.vidcap.get(cv2.CAP_PROP_FRAME_COUNT)
+
+        self.df = self.load_df(self.df_file)
+
+    # -------------------------------------------------------------------------------
+
+    @staticmethod
+    def load_df(file_name):
+        if exists(file_name):
+            return pd.read_csv(file_name)
+        else:
+            return pd.DataFrame(columns=COLUMNS)
 
     # -------------------------------------------------------------------------------
 
@@ -32,9 +49,14 @@ class SubtitleTranscription:
 
     # -------------------------------------------------------------------------------
 
-    def play_video(self, frame, speed=1):
-        cv2.imshow('frame', frame)
-        cv2.waitKey(speed)
+    def play_video(self, frame, delay=1):
+        cv2.imshow(self.video_file, frame)
+        cv2.waitKey(delay)
+
+    # -------------------------------------------------------------------------------
+
+    def save_df(self):
+        self.df.to_csv(self.df_file, index=False, encoding='utf-8-sig')
 
     # -------------------------------------------------------------------------------
 
@@ -45,27 +67,9 @@ class SubtitleTranscription:
 
     # -------------------------------------------------------------------------------
 
-    def translate(self, text):
-        api_token = "api_xxxxxxxxxxxxxxxxxxxxxxxxxxx"
-        headers = {"Authorization": f"Bearer {api_token}"}
-        model_id = 'Helsinki-NLP/opus-mt-zh-en'
-        url = f"https://api-inference.huggingface.co/models/{model_id}"
-        payload = {"inputs": text}
-
-        response = requests.post(url, headers=headers, json=payload).json()
-        if isinstance(response, dict):
-            print(response)
-            sleep(response['estimated_time'])
-            return self.translate(text)
-        else:
-            return response[0]['translation_text']
-
-    # -------------------------------------------------------------------------------
-
     def get_frames(self, raw=False):
         [x, y, w, h] = self.bbox
         self.vidcap = self.load_video(self.video_file)
-
         success, frame = self.vidcap.read()
         while success:
             if not raw:
@@ -75,7 +79,8 @@ class SubtitleTranscription:
 
     # -------------------------------------------------------------------------------
 
-    def get_contours(self, img):
+    @staticmethod
+    def get_contours(img):
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
         dilate = cv2.dilate(img, kernel, iterations=6)
         thresh = cv2.threshold(dilate, 180, 255, cv2.THRESH_BINARY)[1]
@@ -88,12 +93,9 @@ class SubtitleTranscription:
 
     # -------------------------------------------------------------------------------
 
-    def is_similar(self, prev_frame, curr_frame):
+    def frame_scores(self, prev_frame, curr_frame):
         contour = self.get_contours(curr_frame)
-
-        is_empty_frame = True
         if contour is None:
-            is_empty_frame = False
             contour = self.get_contours(prev_frame)
 
         if contour is not None:
@@ -101,97 +103,93 @@ class SubtitleTranscription:
             prev_frame = prev_frame[y:y+h, x:x+w]
             curr_frame = curr_frame[y:y+h, x:x+w]
 
-        mse_score = int(mean_squared_error(prev_frame, curr_frame))
-        ssim_score = int(ssim(prev_frame, curr_frame)*100)
-
-        similar = True
-        if ssim_score < 70 and mse_score > 2000:
-            similar = False
-
-        return similar, [ssim_score, mse_score], is_empty_frame
+        return {
+            'ssim': round(ssim(prev_frame, curr_frame)*100, 2),
+            'mse': round(mean_squared_error(prev_frame, curr_frame), 2),
+            'contour': contour is not None
+        }
 
     # -------------------------------------------------------------------------------
 
-    def get_subtitle_stamp(self):
-        stamp = []
+    def translate(self, text):
+        api_token = "api_HEtcUvCvjXPLClCVJbaEwhaqbBmGoDYxFu"
+        headers = {"Authorization": f"Bearer {api_token}"}
+        model_id = 'Helsinki-NLP/opus-mt-zh-en'
+        url = f"https://api-inference.huggingface.co/models/{model_id}"
+        payload = {"inputs": text}
+
+        response = requests.post(url, headers=headers, json=payload).json()
+        if isinstance(response, dict):
+            # print(response)
+            sleep(response['estimated_time'])
+            return self.translate(text)
+        else:
+            return response[0]['translation_text']
+
+    # -------------------------------------------------------------------------------
+
+    def extract_video_info(self):
+        frame_count = 1
         prev_frame = None
-        start = frame_count = 1
+        reader = easyocr.Reader(['ch_sim'])
+        trans_dict = self.df[['text', 'trans']].set_index('text').to_dict()['trans']
 
         for frame in self.get_frames():
-            if prev_frame is not None:
-                similar, score, is_empty_frame = self.is_similar(prev_frame, frame)
+            scores = self.frame_scores(prev_frame, frame) if prev_frame is not None else {}
+    
+            if frame_count not in self.df['frame'].values:
+                text = ''
+                if scores.get('contour', True):
+                    text = ' '.join(reader.readtext(frame, detail=0)).strip()
+                    if trans_dict.get(text) is None and len(text)>0:
+                        trans_dict[text] = self.translate(text)                    
 
-                if not similar:
-                    if not is_empty_frame:
-                        stamp.append((start, frame_count-1))
-                    start = frame_count
-                    cv2.imwrite(f'temp/{frame_count}_{str(score)}.jpg', frame)
+                self.df = self.df.append({
+                    'frame': frame_count,
+                    'mse': scores.get('mse'),
+                    'ssim': scores.get('ssim'),
+                    'text': text,
+                    'trans': trans_dict.get(text)
+                }, ignore_index=True)
+                self.save_df()
 
             self.counter(frame_count)
             prev_frame = frame
             frame_count += 1
-        return stamp
 
     # -------------------------------------------------------------------------------
 
-    def extract_subtitles(self, stamp):
-        text = []
-        frame_count = 1
-        reader = easyocr.Reader(['ch_sim'])
-        stamp_list = [int((start+end)/2) for (start, end) in stamp]
-
-        for frame in self.get_frames():
-            if frame_count in stamp_list:
-                text.append(reader.readtext(frame, detail=0))
-                print(text[-1])
-
-            self.counter(frame_count)
-            frame_count += 1
-        return text
-
-    # -------------------------------------------------------------------------------
-
-    def transcript_text(self, stamp_list, text_list, trans_dict={}):
+    def transcript_text(self, file_name):
         [x, y, w, h] = self.bbox
-        y -= h
+        # y -= h
 
         thick = 1
+        font_size = 0.9
         font_color = (255, 255, 255)
         font = cv2.FONT_HERSHEY_COMPLEX_SMALL
-        file_name = self.video_file.replace('.', '_edit.')
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         output = cv2.VideoWriter(file_name, fourcc, self.fps, (self.w_frame, self.h_frame))
 
         frame_count = 1
+        frame_text = zip(self.get_frames(raw=True), self.df['trans'].values)
+        for frame,text in frame_text:
+            if isinstance(text, str):
+                (text_width, text_height) = cv2.getTextSize(text, font, font_size, thick)[0]
+                loc_x = x + int(w/2) - int(text_width/2)
+                loc_y = y + int(h/2) + int(text_height/2)
+                mask = np.zeros((h, w), dtype=np.uint8)
+                frame[y:y+h, x:x+w, :] = cv2.merge((mask, mask, mask))
 
-        for frame in self.get_frames(raw=True):
-            for index, (start, end) in enumerate(stamp_list):
-
-                if frame_count in range(start, end+1):
-                    text = ' '.join(text_list[index])
-                    if trans_dict.get(text) is None:
-                        trans_dict[text] = self.translate(text)
-                    text = trans_dict[text]
-
-                    font_size = 0.9
-                    (text_width, text_height) = cv2.getTextSize(text, font, font_size, thick)[0]
-                    loc_x = x + int(w/2) - int(text_width/2)
-                    loc_y = y + int(h/2) + int(text_height/2)
-
-                    if text_width > w:
-                        text = 'LENGTH EXCEEDED'
-
-                    mask = np.zeros((h, w), dtype=np.uint8)
-                    frame[y:y+h, x:x+w, :] = cv2.merge((mask, mask, mask))
-                    frame = cv2.putText(frame, text, (loc_x, loc_y), font, font_size, font_color, thick, cv2.LINE_AA)
-                    break
+                if text_width > w: # do something
+                        ...
+                frame = cv2.putText(frame, text, (loc_x, loc_y), font, font_size, font_color, thick, cv2.LINE_AA)
 
             self.counter(frame_count)
+            # self.play_video(frame)
             output.write(frame)
             frame_count += 1
 
         output.release()
-        return trans_dict
 
     # -------------------------------------------------------------------------------
