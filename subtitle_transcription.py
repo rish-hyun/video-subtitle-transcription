@@ -1,3 +1,4 @@
+import os
 import cv2
 import easyocr
 import requests
@@ -5,6 +6,7 @@ import numpy as np
 import pandas as pd
 from time import sleep
 from os.path import exists
+from moviepy.editor import *
 from skimage.metrics import mean_squared_error
 from skimage.metrics import structural_similarity as ssim
 
@@ -104,8 +106,8 @@ class SubtitleTranscription:
             curr_frame = curr_frame[y:y+h, x:x+w]
 
         return {
-            'ssim': round(ssim(prev_frame, curr_frame)*100, 2),
-            'mse': round(mean_squared_error(prev_frame, curr_frame), 2),
+            'ssim': ssim(prev_frame, curr_frame),
+            'mse': mean_squared_error(prev_frame, curr_frame),
             'contour': contour is not None
         }
 
@@ -128,6 +130,12 @@ class SubtitleTranscription:
 
     # -------------------------------------------------------------------------------
 
+    @staticmethod
+    def normalize(df):
+        return (df-df.min())/(df.max()-df.min())
+
+    # -------------------------------------------------------------------------------
+
     def extract_video_info(self):
         frame_count = 1
         prev_frame = None
@@ -136,13 +144,13 @@ class SubtitleTranscription:
 
         for frame in self.get_frames():
             scores = self.frame_scores(prev_frame, frame) if prev_frame is not None else {}
-    
+
             if frame_count not in self.df['frame'].values:
                 text = ''
                 if scores.get('contour', True):
                     text = ' '.join(reader.readtext(frame, detail=0)).strip()
-                    if trans_dict.get(text) is None and len(text)>0:
-                        trans_dict[text] = self.translate(text)                    
+                    if trans_dict.get(text) is None and len(text) > 0:
+                        trans_dict[text] = self.translate(text)
 
                 self.df = self.df.append({
                     'frame': frame_count,
@@ -157,39 +165,93 @@ class SubtitleTranscription:
             prev_frame = frame
             frame_count += 1
 
+        self.df['mse'] = self.normalize(self.df['mse'])
+        frame_splitter = self.df[self.df['mse'] > 0.1]['frame'].values
+        for i in range(len(frame_splitter)-1):
+            start = frame_splitter[i]-1
+            end = frame_splitter[i+1]
+            self.df.loc[start:end, 'trans'] = self.df.loc[(start+end)//2, 'trans'] # todo (get the common frame trans)
+        self.save_df()
+
     # -------------------------------------------------------------------------------
 
-    def transcript_text(self, file_name):
+    def transcript(self, file_name):
         [x, y, w, h] = self.bbox
         # y -= h
 
         thick = 1
-        font_size = 0.9
+        font_size = 0.8
         font_color = (255, 255, 255)
         font = cv2.FONT_HERSHEY_COMPLEX_SMALL
 
+        temp_file_name = file_name.replace('.', '_temp.')
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        output = cv2.VideoWriter(file_name, fourcc, self.fps, (self.w_frame, self.h_frame))
+        output = cv2.VideoWriter(temp_file_name, fourcc, self.fps, (self.w_frame, self.h_frame))
 
         frame_count = 1
         frame_text = zip(self.get_frames(raw=True), self.df['trans'].values)
-        for frame,text in frame_text:
+        for frame, text in frame_text:
             if isinstance(text, str):
                 (text_width, text_height) = cv2.getTextSize(text, font, font_size, thick)[0]
+                if text_width > w:  # do something
+                    ...
+
                 loc_x = x + int(w/2) - int(text_width/2)
                 loc_y = y + int(h/2) + int(text_height/2)
                 mask = np.zeros((h, w), dtype=np.uint8)
                 frame[y:y+h, x:x+w, :] = cv2.merge((mask, mask, mask))
+                cv2.putText(frame, text, (loc_x, loc_y), font, font_size, font_color, thick, cv2.LINE_AA)
 
-                if text_width > w: # do something
-                        ...
-                frame = cv2.putText(frame, text, (loc_x, loc_y), font, font_size, font_color, thick, cv2.LINE_AA)
+            cv2.putText(frame, '@rish_hyun', (524, 394), cv2.FONT_HERSHEY_DUPLEX, 0.6, font_color, thick, cv2.LINE_AA)
 
             self.counter(frame_count)
-            # self.play_video(frame)
+            self.play_video(frame)
             output.write(frame)
             frame_count += 1
 
         output.release()
+        self.finalize(temp_file_name, file_name)
+        os.remove(temp_file_name)
+
+    # -------------------------------------------------------------------------------
+
+    def finalize(self, temp_file_name, file_name):
+        video_clip = VideoFileClip(temp_file_name)
+        video_clip.audio = VideoFileClip(self.video_file).audio
+
+        text = """Subtitles in this video is auto-generated,
+which might not be fully correct.
+
+This video is reposted with subtitles for fun!
+
+You can find the required code to develop
+the subtitles from my github repository
+
+https://github.com/rish-hyun"""
+        clip_1 = self.clip(text, video_clip.size, 15, video_clip.fps)
+
+        text = """Let's enjoy the nostalgic days!"""
+        clip_2 = self.clip(text, video_clip.size, 5, video_clip.fps, (1, 1))
+
+        video_clip = concatenate_videoclips([clip_1, clip_2, video_clip], method="compose")
+        video_clip.write_videofile(file_name)
+        video_clip.close()
+
+    # -------------------------------------------------------------------------------
+
+    @staticmethod
+    def clip(text, size, duration, fps, fade=(2, 2)):
+        color_clip = ColorClip(size=size, color=([0, 0, 0]), duration=duration)\
+            .set_fps(fps)
+
+        text_clip = TextClip(text, color='white', font='Lucida-Console', fontsize=20)\
+            .set_start(0)\
+            .set_end(duration)\
+            .set_fps(fps)\
+            .set_pos('center')\
+            .crossfadein(fade[0])\
+            .crossfadeout(fade[1])
+
+        return CompositeVideoClip([color_clip, text_clip])
 
     # -------------------------------------------------------------------------------
