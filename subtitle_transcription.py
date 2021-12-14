@@ -114,7 +114,7 @@ class SubtitleTranscription:
     # -------------------------------------------------------------------------------
 
     def translate(self, text):
-        api_token = "api_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        api_token = "api_HEtcUvCvjXPLClCVJbaEwhaqbBmGoDYxFu"
         headers = {"Authorization": f"Bearer {api_token}"}
         model_id = 'Helsinki-NLP/opus-mt-zh-en'
         url = f"https://api-inference.huggingface.co/models/{model_id}"
@@ -180,7 +180,6 @@ class SubtitleTranscription:
         # y -= h
 
         thick = 1
-        font_size = 0.8
         font_color = (255, 255, 255)
         font = cv2.FONT_HERSHEY_COMPLEX_SMALL
 
@@ -192,20 +191,22 @@ class SubtitleTranscription:
         frame_text = zip(self.get_frames(raw=True), self.df['trans'].values)
         for frame, text in frame_text:
             if isinstance(text, str):
+                font_size = 0.7
                 (text_width, text_height) = cv2.getTextSize(text, font, font_size, thick)[0]
-                if text_width > w:  # do something
-                    ...
+
+                if text_width > w:
+                    font_size = ((w-20)*font_size)/text_width
+                    (text_width, text_height) = cv2.getTextSize(text, font, font_size, thick)[0]
 
                 loc_x = x + int(w/2) - int(text_width/2)
                 loc_y = y + int(h/2) + int(text_height/2)
                 mask = np.zeros((h, w), dtype=np.uint8)
                 frame[y:y+h, x:x+w, :] = cv2.merge((mask, mask, mask))
                 cv2.putText(frame, text, (loc_x, loc_y), font, font_size, font_color, thick, cv2.LINE_AA)
-
-            cv2.putText(frame, '@rish_hyun', (524, 394), cv2.FONT_HERSHEY_DUPLEX, 0.6, font_color, thick, cv2.LINE_AA)
+            cv2.putText(frame, '@rish_hyun', (578, 469), cv2.FONT_HERSHEY_DUPLEX, 0.3, font_color, thick, cv2.LINE_AA)
 
             self.counter(frame_count)
-            self.play_video(frame)
+            # self.play_video(frame)
             output.write(frame)
             frame_count += 1
 
